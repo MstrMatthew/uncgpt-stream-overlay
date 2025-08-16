@@ -1,0 +1,28 @@
+{
+  "name": "drillsgpt",
+  "version": "1.0.0",
+  "description": "",
+  "main": "modpanel.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "start": "node server.mjs"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/MstrMatthew/uncgpt-stream-overlay.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/MstrMatthew/uncgpt-stream-overlay/issues"
+  },
+  "homepage": "https://github.com/MstrMatthew/uncgpt-stream-overlay#readme",
+  "dependencies": {
+    "dotenv": "^17.2.1",
+    "express": "^5.1.0",
+    "openai": "^5.12.2",
+    "ws": "^8.18.3"
+  }
+}

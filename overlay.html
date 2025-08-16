@@ -1,0 +1,42 @@
+k<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>UncGPT Overlay</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <link rel="stylesheet" href="overlay.css" />
+</head>
+<body>
+  <!-- Audio (OBS captures these) -->
+  <audio id="sfx" preload="auto"></audio>
+  <audio id="tts" preload="auto"></audio>
+
+  <!-- CTA card -->
+  <section id="cta" aria-live="polite" aria-atomic="true">
+    <!-- Banner sits behind the text -->
+    <div class="banner-wrap" aria-hidden="true">
+      <img id="ctaBanner" src="banner.png" alt="" />
+    </div>
+
+    <div class="cta-body">
+      <div class="line userline">
+        <span id="ctaUser">Viewer</span>
+        <span class="asks">asks:</span>
+      </div>
+
+      <div id="ctaQuestion" class="question"></div>
+      <div id="ctaAnswer" class="answer"></div>
+    </div>
+
+    <!-- Rotating CTA messages -->
+    <div id="ctaTicker" class="ticker" aria-hidden="true">
+      <div class="msg active">Ask anything — real talk, game-ready.</div>
+      <div class="msg">Channel points or $1 tip to ask.</div>
+      <div class="msg">$3 = HYPE (jumps the line).</div>
+      <div class="msg">HYPE messages get first priority.</div>
+    </div>
+  </section>
+
+  <script src="overlay.js" defer></script>
+</body>
+</html>
