@@ -1,4 +1,10 @@
+# secrets
 .env
-node_modules/
+tokens.twitch.json
+
+# runtime data
+data/
+
+# OS / editor
 .DS_Store
-npm-debug.log*
+tokens.twitch.json
