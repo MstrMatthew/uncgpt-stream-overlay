@@ -174,3 +174,39 @@ html, body {
 .question {
   text-shadow: 0 3px 6px rgba(0,0,0,0.6) !important;
 }
+
+/* --- Ticker rotation (one line visible) --- */
+#cta { position: relative; }
+.ticker{
+  position:absolute; left:50%; bottom:2.5vh; transform:translateX(-50%);
+  max-width:min(90vw,1200px);
+  text-align:center; pointer-events:none;
+  font: 600 clamp(12px,1.4vw,18px)/1.2 system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+  letter-spacing:0.2px; opacity:0.9;
+  color:#fff; text-shadow:0 1px 2px rgba(0,0,0,.6);
+}
+.ticker .msg{ display:none; opacity:0; transition:opacity .3s ease; }
+.ticker .msg.active{ display:block; opacity:1; }
+
+/* --- Reserve space so ticker never overlaps the text --- */
+#cta { position: relative; padding-bottom: 9vh; }  /* room for ticker */
+#ctaUser, #ctaQuestion, #ctaAnswer { position: relative; z-index: 2; }
+
+/* Pin ticker to the bottom center */
+.ticker{
+  position: absolute;
+  left: 50%;
+  bottom: 2.5vh;
+  transform: translateX(-50%);
+  z-index: 1;
+}
+
+/* --- Sound gate button (click once to enable audio) --- */
+.sound-gate{
+  position:absolute; left:50%; top:50%; transform:translate(-50%,-50%);
+  padding:.8rem 1.2rem; font-weight:700; border-radius:.75rem;
+  background:rgba(0,0,0,.6); color:#fff; border:1px solid rgba(255,255,255,.35);
+  box-shadow:0 8px 24px rgba(0,0,0,.25); backdrop-filter:blur(6px);
+  cursor:pointer; z-index:9999; user-select:none;
+}
+.sound-gate.hidden{ display:none !important; }

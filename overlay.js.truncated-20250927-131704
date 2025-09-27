@@ -1,0 +1,336 @@
+// overlay.js — UncGPT overlay client (Terminal drop-in)
+
+(() => {
+  // ===== Config =====
+  const DELAYS = {
+    questionToAnswerMs: 3000,   // pause between question and answer
+    hypeGlowMs: 12000           // how long the neon pulse runs
+  };
+  const USE_TTS_FOR = {
+    question: false,            // keep false to avoid the "double sound" feel
+    answer:   true
+  };
+
+  // ===== DOM =====
+  const el = {
+    cta: document.getElementById('cta'),
+    user: document.getElementById('ctaUser'),
+    q: document.getElementById('ctaQuestion'),
+    a: document.getElementById('ctaAnswer'),
+    ticker: document.getElementById('ctaTicker'),
+    sfx: document.getElementById('sfx'),
+    tts: document.getElementById('tts'),
+    banner: document.getElementById('ctaBanner')
+  };
+
+  // ===== State =====
+  let ws = null;
+  let tickerTimer = null;
+  let lastEvent = null;      // { user, question, answer, tier }
+  let pendingAnswerTimer = null;
+  let isPausedForAnswer = false;
+  let askSoundPlayedThisCycle = false;
+
+  // ===== Ticker =====
+  function startTicker() {
+    if (tickerTimer) return;
+    const msgs = Array.from(el.ticker.querySelectorAll('.msg'));
+    let idx = 0;
+    tickerTimer = setInterval(() => {
+      if (isPausedForAnswer) return;
+      msgs.forEach(m => m.classList.remove('active'));
+      idx = (idx + 1) % msgs.length;
+      msgs[idx].classList.add('active');
+    }, 3500);
+  }
+  function pauseTicker(pause) {
+    isPausedForAnswer = !!pause;
+  }
+  startTicker();
+
+  // ===== Utilities =====
+  function wsURL() {
+    try {
+      const base = new URL(window.location.href);
+      base.protocol = base.protocol.replace('http', 'ws');
+      base.pathname = '/ws';
+      base.search = '';
+      base.hash = '';
+      return base.toString();
+    } catch {
+      return (location.origin.replace(/^http/, 'ws') + '/ws');
+    }
+  }
+
+  function cleanQuestion(txt) {
+    return String(txt || '')
+      .replace(/^asks:\s*/i, '') // remove leading "asks:"
+      .trim();
+  }
+
+  function clearPending() {
+    if (pendingAnswerTimer) { clearTimeout(pendingAnswerTimer); pendingAnswerTimer = null; }
+    askSoundPlayedThisCycle = false;
+    stopAudio(el.tts);
+  }
+
+  function stopAudio(audioEl) {
+    try {
+      audioEl.pause();
+      audioEl.currentTime = 0;
+    } catch {}
+  }
+
+  async function playAskSoundOnce() {
+    if (askSoundPlayedThisCycle) return;
+    askSoundPlayedThisCycle = true;
+    try {
+      el.sfx.src = 'sounds/ask.mp3';  // optional file; safe if 404
+      await el.sfx.play().catch(()=>{});
+    } catch {}
+  }
+
+  async function tts(text) {
+    try {
+      const url = `/api/tts?q=${encodeURIComponent(text)}`;
+      const res = await fetch(url, { cache: 'no-store' });
+      if (!res.ok) return;             // 204 on mute, 500 on fail
+      const blob = await res.blob();
+      const obj = URL.createObjectURL(blob);
+      el.tts.src = obj;
+      await el.tts.play().catch(()=>{});
+      el.tts.onended = () => { URL.revokeObjectURL(obj); };
+    } catch (e) { /* ignore */ }
+  }
+
+  function setHypeGlow(enabled) {
+    el.cta.classList.toggle('hype-active', !!enabled);
+    if (enabled) {
+      setTimeout(() => el.cta.classList.remove('hype-active'), DELAYS.hypeGlowMs);
+    }
+  }
+
+  function renderQuestion(user, question, tier, { replay=false } = {}) {
+    clearPending();
+    el.user.textContent = user || 'Viewer';
+    el.q.textContent = question || '';
+    el.a.textContent = '';
+    if (!replay) {
+      playAskSoundOnce();
+      if (USE_TTS_FOR.question) tts(question);
+    }
+    setHypeGlow(tier === 'hype');
+    pauseTicker(true);
+  }
+
+  function revealAnswer(answer) {
+    el.a.textContent = answer || '';
+    if (USE_TTS_FOR.answer && answer) tts(answer);
+    pauseTicker(false);
+  }
+
+  function onAnswerMessage(payload, { replay=false } = {}) {
+    const user = payload.user || 'Viewer';
+    const question = cleanQuestion(payload.question);
+    const answer = payload.answer || '';
+    const tier = payload.tier || 'free';
+
+    lastEvent = { user, question, answer, tier };
+    renderQuestion(user, question, tier, { replay });
+    pendingAnswerTimer = setTimeout(() => revealAnswer(answer), DELAYS.questionToAnswerMs);
+  }
+
+  function onReplay() {
+    if (!lastEvent) return;
+    onAnswerMessage(lastEvent, { replay: true });
+  }
+
+  function onTtsMute(_msg) { /* NOP; endpoint handles mute */ }
+  function onQueueUpdate(_msg) { /* overlay doesn't display queue */ }
+
+  function connectWS() {
+    try { if (ws) ws.close(); } catch {}
+    ws = new WebSocket(wsURL());
+    ws.onopen = () => console.log('[ws] connected');
+    ws.onclose = () => { console.log('[ws] closed; retrying…'); setTimeout(connectWS, 1500); };
+    ws.onerror = (e) => console.warn('[ws] error', e?.message || e);
+    ws.onmessage = (ev) => {
+      let msg = null;
+      try { msg = JSON.parse(ev.data); } catch { return; }
+      if (!msg?.type) return;
+      switch (msg.type) {
+        case 'uncgpt:answer': onAn
+
+
+
+cat > overlay.js <<'EOF'
+// overlay.js — UncGPT overlay client (Terminal drop-in)
+
+(() => {
+  // ===== Config =====
+  const DELAYS = {
+    questionToAnswerMs: 3000,   // pause between question and answer
+    hypeGlowMs: 12000           // how long the neon pulse runs
+  };
+  const USE_TTS_FOR = {
+    question: false,            // keep false to avoid the "double sound" feel
+    answer:   true
+  };
+
+  // ===== DOM =====
+  const el = {
+    cta: document.getElementById('cta'),
+    user: document.getElementById('ctaUser'),
+    q: document.getElementById('ctaQuestion'),
+    a: document.getElementById('ctaAnswer'),
+    ticker: document.getElementById('ctaTicker'),
+    sfx: document.getElementById('sfx'),
+    tts: document.getElementById('tts'),
+    banner: document.getElementById('ctaBanner')
+  };
+
+  // ===== State =====
+  let ws = null;
+  let tickerTimer = null;
+  let lastEvent = null;      // { user, question, answer, tier }
+  let pendingAnswerTimer = null;
+  let isPausedForAnswer = false;
+  let askSoundPlayedThisCycle = false;
+
+  // ===== Ticker =====
+  function startTicker() {
+    if (tickerTimer) return;
+    const msgs = Array.from(el.ticker.querySelectorAll('.msg'));
+    let idx = 0;
+    tickerTimer = setInterval(() => {
+      if (isPausedForAnswer) return;
+      msgs.forEach(m => m.classList.remove('active'));
+      idx = (idx + 1) % msgs.length;
+      msgs[idx].classList.add('active');
+    }, 3500);
+  }
+  function pauseTicker(pause) {
+    isPausedForAnswer = !!pause;
+  }
+  startTicker();
+
+  // ===== Utilities =====
+  function wsURL() {
+    try {
+      const base = new URL(window.location.href);
+      base.protocol = base.protocol.replace('http', 'ws');
+      base.pathname = '/ws';
+      base.search = '';
+      base.hash = '';
+      return base.toString();
+    } catch {
+      return (location.origin.replace(/^http/, 'ws') + '/ws');
+    }
+  }
+
+  function cleanQuestion(txt) {
+    return String(txt || '')
+      .replace(/^asks:\s*/i, '') // remove leading "asks:"
+      .trim();
+  }
+
+  function clearPending() {
+    if (pendingAnswerTimer) { clearTimeout(pendingAnswerTimer); pendingAnswerTimer = null; }
+    askSoundPlayedThisCycle = false;
+    stopAudio(el.tts);
+  }
+
+  function stopAudio(audioEl) {
+    try {
+      audioEl.pause();
+      audioEl.currentTime = 0;
+    } catch {}
+  }
+
+  async function playAskSoundOnce() {
+    if (askSoundPlayedThisCycle) return;
+    askSoundPlayedThisCycle = true;
+    try {
+      el.sfx.src = 'sounds/ask.mp3';  // optional file; safe if 404
+      await el.sfx.play().catch(()=>{});
+    } catch {}
+  }
+
+  async function tts(text) {
+    try {
+      const url = `/api/tts?q=${encodeURIComponent(text)}`;
+      const res = await fetch(url, { cache: 'no-store' });
+      if (!res.ok) return;             // 204 on mute, 500 on fail
+      const blob = await res.blob();
+      const obj = URL.createObjectURL(blob);
+      el.tts.src = obj;
+      await el.tts.play().catch(()=>{});
+      el.tts.onended = () => { URL.revokeObjectURL(obj); };
+    } catch (e) { /* ignore */ }
+  }
+
+  function setHypeGlow(enabled) {
+    el.cta.classList.toggle('hype-active', !!enabled);
+    if (enabled) {
+      setTimeout(() => el.cta.classList.remove('hype-active'), DELAYS.hypeGlowMs);
+    }
+  }
+
+  function renderQuestion(user, question, tier, { replay=false } = {}) {
+    clearPending();
+    el.user.textContent = user || 'Viewer';
+    el.q.textContent = question || '';
+    el.a.textContent = '';
+    if (!replay) {
+      playAskSoundOnce();
+      if (USE_TTS_FOR.question) tts(question);
+    }
+    setHypeGlow(tier === 'hype');
+    pauseTicker(true);
+  }
+
+  function revealAnswer(answer) {
+    el.a.textContent = answer || '';
+    if (USE_TTS_FOR.answer && answer) tts(answer);
+    pauseTicker(false);
+  }
+
+  function onAnswerMessage(payload, { replay=false } = {}) {
+    const user = payload.user || 'Viewer';
+    const question = cleanQuestion(payload.question);
+    const answer = payload.answer || '';
+    const tier = payload.tier || 'free';
+
+    lastEvent = { user, question, answer, tier };
+    renderQuestion(user, question, tier, { replay });
+    pendingAnswerTimer = setTimeout(() => revealAnswer(answer), DELAYS.questionToAnswerMs);
+  }
+
+  function onReplay() {
+    if (!lastEvent) return;
+    onAnswerMessage(lastEvent, { replay: true });
+  }
+
+  function onTtsMute(_msg) { /* NOP; endpoint handles mute */ }
+  function onQueueUpdate(_msg) { /* overlay doesn't display queue */ }
+
+  function connectWS() {
+    try { if (ws) ws.close(); } catch {}
+    ws = new WebSocket(wsURL());
+    ws.onopen = () => console.log('[ws] connected');
+    ws.onclose = () => { console.log('[ws] closed; retrying…'); setTimeout(connectWS, 1500); };
+    ws.onerror = (e) => console.warn('[ws] error', e?.message || e);
+    ws.onmessage = (ev) => {
+      let msg = null;
+      try { msg = JSON.parse(ev.data); } catch { return; }
+      if (!msg?.type) return;
+      switch (msg.type) {
+        case 'uncgpt:answer': onAnswerMessage(msg); break;
+        case 'uncgpt:replay': onReplay(); break;
+        case 'uncgpt:tts_mute': onTtsMute(msg); break;
+        case 'uncgpt:queue:update': onQueueUpdate(msg); break;
+      }
+    };
+  }
+  connectWS();
+})();

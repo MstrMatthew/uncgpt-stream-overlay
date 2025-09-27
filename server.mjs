@@ -1,7 +1,7 @@
-// server.mjs — UncGPT overlay server with Twitch EventSub WS + StreamElements tips
-// npm i express ws dotenv openai
+// server.mjs — UncGPT overlay server with strict viewer-as-asker logic
 
-import 'dotenv/config';
+import dotenv from 'dotenv';
+dotenv.config({ override: true });;
 import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
@@ -11,9 +11,6 @@ import { WebSocketServer, WebSocket as WSClient } from 'ws';
 import crypto from 'crypto';
 import OpenAI from 'openai';
 
-// -----------------------------------------------------------------------------
-// Paths & Env
-// -----------------------------------------------------------------------------
 const __filename = fileURLToPath(import.meta.url);
 const __dirname  = path.dirname(__filename);
 
@@ -30,11 +27,15 @@ const OPENAI_API_KEY    = process.env.OPENAI_API_KEY || '';
 const OPENAI_MODEL_FREE = process.env.OPENAI_MODEL_FREE || 'gpt-4o-mini';
 const OPENAI_MODEL_PAID = process.env.OPENAI_MODEL_PAID || 'gpt-4o';
 
-const FREE_MIN  = Number(process.env.FREE_TIER_MIN_CENTS || 100);  // $1
-const HYPE_MIN  = Number(process.env.HYPE_TIER_MIN_CENTS || 300);  // $3
+const FREE_MIN  = Number(process.env.FREE_TIER_MIN_CENTS || 300);   // $3
+const HYPE_MIN  = Number(process.env.HYPE_TIER_MIN_CENTS || 1000);  // $10
 const BITS_TO_CENTS = Number(process.env.BITS_TO_CENTS || 1);
 
-// Twitch (Channel Points via EventSub WS)
+const PERSONA_SPICE    = Number(process.env.PERSONA_SPICE || 8);
+const STREAMER_NAME    = (process.env.STREAMER_NAME || 'Matthew').trim();
+const STREAMER_ALIASES = (process.env.STREAMER_ALIASES || 'Matthew|MstrMatthew')
+  .split('|').map(s=>s.trim()).filter(Boolean).map(s=>s.toLowerCase());
+
 const TWITCH_CLIENT_ID       = process.env.TWITCH_CLIENT_ID || '';
 const TWITCH_CLIENT_SECRET   = process.env.TWITCH_CLIENT_SECRET || '';
 const TWITCH_REDIRECT_URI    = process.env.TWITCH_REDIRECT_URI || `${BASE}/auth/twitch/callback`;
@@ -43,30 +44,21 @@ const TWITCH_BROADCASTER_LOGIN = (process.env.TWITCH_BROADCASTER_LOGIN || '').to
 const TWITCH_ALLOWED_REWARD_TITLE = (process.env.TWITCH_ALLOWED_REWARD_TITLE || 'Ask UncGPT').trim().toLowerCase();
 const TWITCH_REQUIRE_TEXT = String(process.env.TWITCH_REQUIRE_TEXT || 'true').toLowerCase() === 'true';
 
-// StreamElements tips
 const SE_JWT = process.env.SE_JWT || '';
 
 console.log('[env] OPENAI_API_KEY:', OPENAI_API_KEY ? OPENAI_API_KEY.slice(0,7)+'…' : 'MISSING');
 console.log('[env] TTS voice:', CURRENT_VOICE);
 console.log('[env] FREE/HYPE cents:', FREE_MIN, HYPE_MIN);
 
-const openai = OPENAI_API_KEY ? new OpenAI({ apiKey: OPENAI_API_KEY }) : null;
-
-// -----------------------------------------------------------------------------
-// Express app & static files
-// -----------------------------------------------------------------------------
 const app = express();
 app.use(express.json({ limit: '1mb' }));
 
-// Serve project root and /public if present
 [ path.join(__dirname,'public'), __dirname ].forEach(root => {
   if (fs.existsSync(root)) {
     console.log('[static]', root);
     app.use(express.static(root, { extensions: ['html'] }));
   }
 });
-
-// Friendly aliases
 app.get(['/overlay','/overlay.html'], (req,res)=>{
   const p1 = path.join(__dirname,'public','overlay.html');
   const p2 = path.join(__dirname,'overlay.html');
@@ -81,12 +73,8 @@ app.get(['/modpanel','/modpanel.html'], (req,res)=>{
   if (fs.existsSync(p2)) return res.sendFile(p2);
   res.status(404).send('modpanel.html not found');
 });
-
 app.get('/health', (req,res)=> res.json({ ok:true, time:new Date().toISOString() }));
 
-// -----------------------------------------------------------------------------
-// WebSocket hub (overlay/modpanel)
-// -----------------------------------------------------------------------------
 const server = http.createServer(app);
 const wss = new WebSocketServer({ server, path: '/ws' });
 const sendAll = obj => {
@@ -98,9 +86,6 @@ wss.on('connection', ws => {
   ws.on('close', ()=> console.log('[ws] client disconnected'));
 });
 
-// -----------------------------------------------------------------------------
-// Moderation (soft; block explicit real-world harm only)
-// -----------------------------------------------------------------------------
 const GAME_TERMS = /\b(elden\s*ring|fire\s*giant|boss|raid|dungeon|build|loadout|soulslike|dark\s*souls|monster hunter|boss fight|strategy|guide)\b/i;
 function shouldBlock(q='') {
   const x = String(q).toLowerCase();
@@ -110,10 +95,7 @@ function shouldBlock(q='') {
   return VIOL.test(x) && REAL.test(x);
 }
 
-// -----------------------------------------------------------------------------
-// Queue (priority: hype first, FIFO within priority)
-// -----------------------------------------------------------------------------
-const queue = []; // in-memory
+const queue = [];
 let answering = false;
 
 function deriveTier(amountCents=0) {
@@ -147,14 +129,12 @@ function bumpItem(id) {
   const i = queue.find(x => x.id === id && x.status==='queued');
   if (!i) return false;
   i.priority = 1;
-  i.ts = Math.min(...queue.map(q=>q.ts)) - 1; // bubble to front
+  i.ts = Math.min(...queue.map(q=>q.ts)) - 1;
   queue.sort((a,b)=> (b.priority-a.priority) || (a.ts-b.ts));
   broadcastQueue();
   return true;
 }
-function nextQueued() {
-  return queue.find(x => x.status === 'queued');
-}
+function nextQueued() { return queue.find(x => x.status === 'queued'); }
 function broadcastQueue() {
   const items = queue
     .filter(x => x.status==='queued')
@@ -162,33 +142,75 @@ function broadcastQueue() {
   sendAll({ type:'uncgpt:queue:update', items });
 }
 
-// -----------------------------------------------------------------------------
-// LLM Answer (OpenAI)
-// -----------------------------------------------------------------------------
+// ——— Persona & host/asker rules
+function personaSystemPrompt(spice=8, host='Matthew', aliasList=['Matthew','MstrMatthew']) {
+  const lvl = Math.max(1, Math.min(10, Number(spice)||8));
+  const heat =
+    lvl>=9 ? 'very bold and sharp' :
+    lvl>=7 ? 'bold, spicy, and direct' :
+    lvl>=5 ? 'confident and candid' : 'balanced and steady';
+
+  return [
+    `You are UncGPT — the unfiltered but respectful “uncle” mentor. Voice: ${heat}.`,
+    `Light AAVE cadence is fine. No caricature. PG-13. Punch up, not down.`,
+    `Brevity: roast one-liner first, then at most one short line or 2 tiny bullets.`,
+    `DEFAULT ASSUMPTION: the asker is a viewer/fan (NOT the host). Address the asker directly as "you".`,
+    `HOST CONTEXT: The host is ${host}. Host aliases: ${aliasList.join(', ')}.`,
+    `HARD RULES:`,
+    `- Do NOT speak to or about the host by name unless the asker IS the host.`,
+    `- If the question mentions the host in third-person, treat it as a topic; still address the viewer. No calling out the host by name unless asker IS host.`,
+    `- Never sign-off with the host's name.`,
+    `Safety: refuse illegal/harmful requests with firm humor and redirect safely.`
+  ].join(' ');
+}
+function isHostName(name='') {
+  const n = String(name||'').trim().toLowerCase();
+  if (!n) return false;
+  if (n === STREAMER_NAME.toLowerCase()) return true;
+  return STREAMER_ALIASES.includes(n);
+}
+
+// ——— LLM Answer
+const openai = OPENAI_API_KEY ? new OpenAI({ apiKey: OPENAI_API_KEY }) : null;
+
 async function answerItem(item) {
   item.status = 'answering';
   const model = (item.tier === 'hype') ? OPENAI_MODEL_PAID : OPENAI_MODEL_FREE;
 
   let content = 'Standing by…';
-  if (openai) {
-    const system = [
-      'You are UncGPT: a warm, street-smart, respectful mentor.',
-      'Lightly urban tone when natural; never caricature; PG-13; no slurs.',
-      'Not game-only, but game-savvy. Short, punchy answers (1–3 short paragraphs or tight bullets).',
-      'If gaming: give clear, actionable steps. If sensitive (medical/legal/finance): be careful and suggest professional help.'
-    ].join(' ');
-    const userPrompt = `User: ${item.user}\nQuestion: ${item.question}\nAnswer concisely.`;
+  try {
+    if (openai) {
+      const askerIsHost = isHostName(item.user);
+      const system = personaSystemPrompt(PERSONA_SPICE, STREAMER_NAME, STREAMER_ALIASES);
+      const hardGuard = [
+        `Context: asker_is_host=${askerIsHost}.`,
+        `If asker_is_host=false:`,
+        `- Treat the asker as a viewer/fan; never mention the host’s name.`,
+        `- Address the asker as "you".`,
+        `If asker_is_host=true:`,
+        `- You may address the host directly, but still keep it brief.`,
+      ].join(' ');
 
-    const resp = await openai.chat.completions.create({
-      model,
-      messages: [
-        { role: 'system', content: system },
-        { role: 'user',   content: userPrompt }
-      ],
-      temperature: 0.6,
-      max_tokens: 400
-    });
-    content = resp?.choices?.[0]?.message?.content?.trim() || 'I got you.';
+      const userPrompt = [
+        `Asker name: ${item.user || 'Viewer'}`,
+        `Question: ${item.question}`,
+        `Style cap: one roast line first; then ≤1 short line or 2 tiny bullets; ≤45 words total.`,
+      ].join('\n');
+
+      const completion = await openai.chat.completions.create({
+        model,
+        messages: [
+          { role: 'system', content: system },
+          { role: 'system', content: hardGuard },
+          { role: 'user',   content: userPrompt }
+        ],
+        temperature: 0.85,
+        max_tokens: 140
+      });
+      content = completion?.choices?.[0]?.message?.content?.trim() || 'Say less.';
+    }
+  } catch (e) {
+    console.error('[answer] openai error', e?.message || e);
   }
 
   sendAll({
@@ -208,20 +230,12 @@ async function pump() {
   const item = nextQueued();
   if (!item) return;
   answering = true;
-  try {
-    await answerItem(item);
-  } catch (e) {
-    console.error('[answer] error', e);
-    item.status = 'blocked';
-  } finally {
-    answering = false;
-    setTimeout(pump, 300);
-  }
+  try { await answerItem(item); }
+  catch (e) { console.error('[answer] error', e); item.status = 'blocked'; }
+  finally { answering = false; setTimeout(pump, 300); }
 }
 
-// -----------------------------------------------------------------------------
-// API: ask + queue controls
-// -----------------------------------------------------------------------------
+// ——— API: ask + queue controls
 app.post('/api/ask', async (req,res) => {
   try {
     const { user='Viewer', question='', amountCents=0, source='mod' } = req.body || {};
@@ -235,7 +249,6 @@ app.post('/api/ask', async (req,res) => {
     res.json({ ok:true, id:item.id, tier:item.tier });
   } catch (e) { console.error('/api/ask error', e); res.status(500).json({ error:'server_error' }); }
 });
-
 app.get('/api/queue', (req,res)=> {
   res.json({ items: queue.map(x=>({
     id:x.id, user:x.user, question:x.question, tier:x.tier,
@@ -255,21 +268,16 @@ app.post('/api/queue/:id/answer-now', (req,res)=> {
   res.json({ ok:true });
 });
 
-// -----------------------------------------------------------------------------
-// Admin: voice, mute TTS, overlay replay
-// -----------------------------------------------------------------------------
+// ——— Admin
 let TTS_MUTED = false;
-
 app.put('/admin/tts/voice', (req,res)=>{
   if (!ADMIN) return res.status(403).json({ error:'ADMIN_TOKEN not set' });
   if ((req.headers['x-admin-token']||'') !== ADMIN) return res.status(403).json({ error:'forbidden' });
   const v = (req.query.voice || '').toString().trim();
   if (!v) return res.status(400).json({ error:'missing voice' });
-  CURRENT_VOICE = v;
-  console.log('[tts] default voice set to:', CURRENT_VOICE);
+  CURRENT_VOICE = v; console.log('[tts] default voice set to:', CURRENT_VOICE);
   res.json({ ok:true, voice: CURRENT_VOICE });
 });
-
 app.put('/admin/tts/mute', (req,res)=>{
   if (!ADMIN) return res.status(403).json({ error:'ADMIN_TOKEN not set' });
   if ((req.headers['x-admin-token']||'') !== ADMIN) return res.status(403).json({ error:'forbidden' });
@@ -277,7 +285,6 @@ app.put('/admin/tts/mute', (req,res)=>{
   sendAll({ type:'uncgpt:tts_mute', enabled: TTS_MUTED });
   res.json({ ok:true, enabled: TTS_MUTED });
 });
-
 app.post('/admin/overlay/replay', (req,res)=>{
   if (!ADMIN) return res.status(403).json({ error:'ADMIN_TOKEN not set' });
   if ((req.headers['x-admin-token']||'') !== ADMIN) return res.status(403).json({ error:'forbidden' });
@@ -285,9 +292,7 @@ app.post('/admin/overlay/replay', (req,res)=>{
   res.json({ ok:true });
 });
 
-// -----------------------------------------------------------------------------
-// TTS — MP3 via OpenAI (OBS-friendly)
-// -----------------------------------------------------------------------------
+// ——— TTS (MP3)
 app.get('/api/tts', async (req,res) => {
   try {
     if (TTS_MUTED) return res.status(204).end();
@@ -312,32 +317,37 @@ app.get('/api/tts', async (req,res) => {
   }
 });
 
-// -----------------------------------------------------------------------------
-// Twitch OAuth + EventSub WebSocket (Channel Points)
-// -----------------------------------------------------------------------------
+// ——— Twitch OAuth & EventSub (unchanged logic except auth refresh)
 const TOKENS_PATH = path.join(__dirname, 'tokens.twitch.json');
+function readTwitchTokens() { try { return JSON.parse(fs.readFileSync(TOKENS_PATH, 'utf8')); } catch { return null; } }
+function writeTwitchTokens(obj) { try { fs.writeFileSync(TOKENS_PATH, JSON.stringify(obj, null, 2)); } catch {} }
 
-function readTwitchTokens() {
-  try { return JSON.parse(fs.readFileSync(TOKENS_PATH, 'utf8')); } catch { return null; }
-}
-function writeTwitchTokens(obj) {
-  try { fs.writeFileSync(TOKENS_PATH, JSON.stringify(obj, null, 2)); } catch {}
+async function getValidTwitchTokens() {
+  let tok = readTwitchTokens();
+  if (!tok?.access_token) return null;
+  const expiresMs = Number(tok.expires_in || 0) * 1000;
+  const ageMs     = Date.now() - Number(tok.obtained || 0);
+  const slack     = 5 * 60 * 1000;
+  if (!expiresMs || ageMs >= (expiresMs - slack)) {
+    try {
+      tok = await refreshTwitchToken(tok);
+      tok.obtained = Date.now();
+      writeTwitchTokens(tok);
+      console.log('[twitch] token refreshed');
+    } catch (e) { console.error('[twitch] refresh failed:', e?.message || e); return null; }
+  }
+  return tok;
 }
 
-// One-time login
 app.get('/auth/twitch/login', (req,res)=>{
   const state = crypto.randomBytes(8).toString('hex');
   const scope = encodeURIComponent('channel:read:redemptions');
   const url = `https://id.twitch.tv/oauth2/authorize?client_id=${TWITCH_CLIENT_ID}&redirect_uri=${encodeURIComponent(TWITCH_REDIRECT_URI)}&response_type=code&scope=${scope}&state=${state}`;
   res.redirect(url);
 });
-
-// Callback (primary)
 app.get('/auth/twitch/callback', async (req,res)=>{
   const code = req.query.code?.toString() || '';
   if (!code) return res.status(400).send('Missing code');
-
-  // Exchange code
   const tokenRes = await fetch('https://id.twitch.tv/oauth2/token', {
     method:'POST',
     headers:{ 'Content-Type':'application/x-www-form-urlencoded' },
@@ -350,7 +360,6 @@ app.get('/auth/twitch/callback', async (req,res)=>{
   const tok = await tokenRes.json();
   if (!tok.access_token) return res.status(500).send('Twitch token exchange failed');
 
-  // Get user info
   const userRes = await fetch('https://api.twitch.tv/helix/users', {
     headers:{ 'Client-Id': TWITCH_CLIENT_ID, 'Authorization': 'Bearer '+tok.access_token }
   });
@@ -370,14 +379,10 @@ app.get('/auth/twitch/callback', async (req,res)=>{
   res.send(`✅ Twitch linked for @${me.login}. You can close this tab and return to the app.`);
   setTimeout(() => { startEventSubWS().catch(console.error); }, 500);
 });
-
-// Callback aliases (so old URLs still work)
 app.get(['/api/twitch/oauth/callback','/api/twitch/callback'], (req,res)=>{
   const qs = new URLSearchParams(req.query).toString();
   res.redirect(302, `/auth/twitch/callback${qs ? `?${qs}` : ''}`);
 });
-
-// Optional: refresh helper (not auto-used yet)
 async function refreshTwitchToken(old) {
   const res = await fetch('https://id.twitch.tv/oauth2/token', {
     method:'POST',
@@ -396,11 +401,10 @@ async function refreshTwitchToken(old) {
   return merged;
 }
 
-// EventSub WS (Channel Points)
 let eventsubWS = null;
 async function startEventSubWS() {
   try { if (eventsubWS) eventsubWS.close(); } catch {}
-  const tok = readTwitchTokens();
+  const tok = await getValidTwitchTokens();
   if (!tok?.access_token) { console.log('[twitch] not linked yet. Visit /auth/twitch/login'); return; }
 
   const url = 'wss://eventsub.wss.twitch.tv/ws';
@@ -416,15 +420,14 @@ async function startEventSubWS() {
     try { msg = JSON.parse(buf.toString()); } catch { return; }
     const mtype = msg?.metadata?.message_type;
 
-    // Welcome -> subscribe
     if (mtype === 'session_welcome') {
-      sessionId = msg?.payload?.session?.id;
+      const sid = msg?.payload?.session?.id;
+      sessionId = sid;
       console.log('[twitch] session id:', sessionId);
       await ensureChannelPointsSubscription(sessionId, tok);
       return;
     }
 
-    // Notification -> redemption
     if (mtype === 'notification') {
       const { subscription, event } = msg.payload || {};
       if (subscription?.type === 'channel.channel_points_custom_reward_redemption.add') {
@@ -432,12 +435,10 @@ async function startEventSubWS() {
         const title = (event?.reward?.title || 'Channel Points').trim();
         const input = (event?.user_input || '').trim();
 
-        // Filter to specific reward
         if (TWITCH_ALLOWED_REWARD_TITLE && title.toLowerCase() !== TWITCH_ALLOWED_REWARD_TITLE) {
           console.log('[twitch] redeem ignored (title mismatch):', title);
           return;
         }
-        // Require viewer text?
         if (TWITCH_REQUIRE_TEXT && !input) {
           console.log('[twitch] redeem ignored (no text):', title);
           return;
@@ -451,7 +452,6 @@ async function startEventSubWS() {
       return;
     }
 
-    // Reconnect hint
     if (mtype === 'session_reconnect') {
       const newUrl = msg?.payload?.session?.reconnect_url;
       if (newUrl) {
@@ -463,9 +463,7 @@ async function startEventSubWS() {
     }
   });
 }
-
 async function ensureChannelPointsSubscription(sessionId, tok) {
-  // resolve broadcaster id
   let broadcasterId = null;
   if (TWITCH_BROADCASTER_LOGIN) {
     const res = await fetch(`https://api.twitch.tv/helix/users?login=${encodeURIComponent(TWITCH_BROADCASTER_LOGIN)}`, {
@@ -478,12 +476,11 @@ async function ensureChannelPointsSubscription(sessionId, tok) {
   }
   if (!broadcasterId) { console.warn('[twitch] could not resolve broadcaster id'); return; }
 
-  // Subscribe to channel points redeems
-  const subRes = await fetch('https://api.twitch.tv/helix/eventsub/subscriptions', {
+  const makeReq = (bearer) => fetch('https://api.twitch.tv/helix/eventsub/subscriptions', {
     method:'POST',
     headers:{
       'Client-Id': TWITCH_CLIENT_ID,
-      'Authorization': 'Bearer '+tok.access_token,
+      'Authorization': 'Bearer '+bearer,
       'Content-Type': 'application/json'
     },
     body: JSON.stringify({
@@ -493,22 +490,35 @@ async function ensureChannelPointsSubscription(sessionId, tok) {
       transport: { method: 'websocket', session_id: sessionId }
     })
   });
-  const sj = await subRes.json();
+
+  let subRes = await makeReq(tok.access_token);
+  if (subRes.status === 401) {
+    console.warn('[twitch] subscribe 401; refreshing token and retrying once…');
+    const fresh = await refreshTwitchToken(tok);
+    fresh.obtained = Date.now();
+    writeTwitchTokens(fresh);
+    subRes = await makeReq(fresh.access_token);
+    if (!subRes.ok) {
+      let msg = {}; try { msg = await subRes.json(); } catch {}
+      console.error('[twitch] subscribe retry failed:', msg);
+      return;
+    }
+    console.log('[twitch] EventSub subscribed after refresh');
+    return;
+  }
+  const sj = await subRes.json().catch(()=> ({}));
   if (subRes.ok) console.log('[twitch] EventSub subscribed:', sj.data?.[0]?.id || 'ok');
   else console.error('[twitch] subscribe error:', sj);
 }
 
-// -----------------------------------------------------------------------------
-// StreamElements Realtime (tips)
-// -----------------------------------------------------------------------------
+// ——— StreamElements (unchanged behavior)
 let seWS = null;
 function startStreamElementsWS() {
-  if (!SE_JWT) { console.log('[se] SE_JWT missing; tips disabled'); return; }
+  if (!SE_JWT) { console.log('[se] SE_JWT missing; tips/bits disabled'); return; }
   try { if (seWS) seWS.close(); } catch {}
 
   const url = 'wss://realtime.streamelements.com/socket.io/?EIO=3&transport=websocket';
   seWS = new WSClient(url);
-
   function send(obj) { try { seWS.send(typeof obj === 'string' ? obj : JSON.stringify(obj)); } catch {} }
 
   seWS.on('open', ()=> console.log('[se] ws open'));
@@ -517,13 +527,7 @@ function startStreamElementsWS() {
 
   seWS.on('message', (data) => {
     const text = data.toString();
-
-    // socket.io v3 framing: "40" = open, "42[...]" = event
-    if (text === '40') {
-      // connected -> authenticate
-      send(`42["authenticate",{"method":"jwt","token":"${SE_JWT}"}]`);
-      return;
-    }
+    if (text === '40') { send(`42["authenticate",{"method":"jwt","token":"${SE_JWT}"}]`); return; }
     if (!text.startsWith('42')) return;
 
     const idx = text.indexOf('[');
@@ -531,107 +535,57 @@ function startStreamElementsWS() {
     let arr = null; try { arr = JSON.parse(text.slice(idx)); } catch { return; }
     const [eventName, payload] = arr;
 
-    if (eventName === 'authenticated') {
-      console.log('[se] authenticated');
-      return;
-    }
+    if (eventName === 'authenticated') { console.log('[se] authenticated'); return; }
+
     if (eventName === 'event') {
       const d = payload?.data || {};
+
       if (payload?.type === 'tip') {
         const user = d?.username || 'Tipper';
-        const amount = Number(d?.amount || 0); // dollars
+        const amount = Number(d?.amount || 0);
         const amountCents = Math.round(amount * 100);
+        const message = (d?.message || '').toString().trim();
+
         console.log('[se] tip:', user, amount);
-        // Map to tiers: $1 = free ; $3 = hype
-        pushItem({ user, question: (d?.message || 'asks:').toString(), amountCents, source: 'tips' });
-        pump();
+        if (amountCents < FREE_MIN) { console.log('[se] tip ignored (<$3):', user, amount); return; }
+
+        const match = message.match(/^asks:\s*(.+)/i);
+        if (!match) { console.log('[se] tip ignored (no asks: prefix):', message); return; }
+
+        pushItem({ user, question: match[1], amountCents, source: 'tips' });
+        pump(); return;
       }
-if (eventName === 'event') {
-  const d = payload?.data || {};
-  if (payload?.type === 'tip') {
-    // ... tip handling ...
-  } else if (payload?.type === 'cheer') {
-    // Twitch bits via StreamElements
-    const user = d?.username || 'Cheerer';
-    const bits = Number(d?.amount ?? d?.bits ?? d?.quantity ?? 0);
-    const amountCents = Math.round(bits * BITS_TO_CENTS);
-    console.log('[se] cheer:', user, bits, 'bits ->', amountCents, '¢');
-    const message = (d?.message || 'asks:').toString();
-    pushItem({ user, question: message, amountCents, source: 'bits' });
-    pump();
-  }
-}
-      // (bits could be handled similarly if routed via SE)
+
+      if (payload?.type === 'cheer') {
+        const user = d?.username || 'Cheerer';
+        const bits = Number(d?.amount ?? d?.bits ?? d?.quantity ?? 0);
+        const amountCents = Math.round(bits * BITS_TO_CENTS);
+        const message = (d?.message || '').toString().trim();
+
+        console.log('[se] cheer:', user, bits, 'bits ->', amountCents, '¢');
+
+        const REQUIRED_BITS = Math.ceil(FREE_MIN / BITS_TO_CENTS);
+        if (bits < REQUIRED_BITS) { console.log('[se] cheer ignored (<', REQUIRED_BITS, 'bits):', user, bits); return; }
+
+        const match = message.match(/^asks:\s*(.+)/i);
+        if (!match) { console.log('[se] cheer ignored (no asks: prefix):', message); return; }
+
+        pushItem({ user, question: match[1], amountCents, source: 'bits' });
+        pump(); return;
+      }
     }
   });
 }
 
-// -----------------------------------------------------------------------------
-// Start
-// -----------------------------------------------------------------------------
+// ——— Boot
 server.listen(PORT, ()=>{
   console.log(`Listening on ${BASE} (PORT ${PORT})`);
   console.log('Overlay :', `${BASE}/overlay.html`);
   console.log('ModPanel:', `${BASE}/modpanel.html`);
   console.log('WS     :', `${BASE.replace('http','ws')}/ws`);
-  // kick off sockets
   startEventSubWS().catch(()=>{});
   startStreamElementsWS();
 });
-// ---- Persistence (queue + history) ----
-function ensureDataDir() {
-  try { if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive:true }); } catch {}
-}
 
-function saveQueue() {
-  try {
-    ensureDataDir();
-    const out = queue.filter(x => x.status === 'queued');
-    fs.writeFileSync(QUEUE_PATH, JSON.stringify(out, null, 2));
-  } catch (e) { console.error('[store] saveQueue error', e?.message||e); }
-}
-
-function loadQueue() {
-  try {
-    ensureDataDir();
-    if (!fs.existsSync(QUEUE_PATH)) return;
-    const raw = JSON.parse(fs.readFileSync(QUEUE_PATH, 'utf8'));
-    if (Array.isArray(raw)) {
-      // keep only queued items; normalize fields
-      raw.forEach(x => {
-        queue.push({
-          id: x.id || (Date.now().toString(36)+Math.random().toString(36).slice(2,6)),
-          user: x.user || 'Viewer',
-          question: x.question || '',
-          source: x.source || 'mod',
-          amountCents: Number(x.amountCents||0),
-          tier: x.tier || 'free',
-          priority: Number(x.priority||0),
-          status: 'queued',
-          ts: Number(x.ts||Date.now())
-        });
-      });
-      queue.sort((a,b)=> (b.priority-a.priority) || (a.ts-b.ts));
-      broadcastQueue();
-    }
-  } catch (e) { console.error('[store] loadQueue error', e?.message||e); }
-}
-
-let history = [];
-const HISTORY_MAX = 500;
-
-function saveHistory() {
-  try {
-    ensureDataDir();
-    fs.writeFileSync(HISTORY_PATH, JSON.stringify(history.slice(-HISTORY_MAX), null, 2));
-  } catch (e) { console.error('[store] saveHistory error', e?.message||e); }
-}
-
-function loadHistory() {
-  try {
-    ensureDataDir();
-    if (!fs.existsSync(HISTORY_PATH)) return;
-    const raw = JSON.parse(fs.readFileSync(HISTORY_PATH, 'utf8'));
-    if (Array.isArray(raw)) history = raw;
-  } catch (e) { console.error('[store] loadHistory error', e?.message||e); }
-}
+// (Optional: queue/history persistence stubs)
+function ensureDataDir() { try { if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive:true }); } catch {} }

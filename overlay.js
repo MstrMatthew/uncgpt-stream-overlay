@@ -1,177 +1,269 @@
-// UncGPT Overlay — queued TTS (question -> answer), hype glow, rotating copy, WS
-// Includes server-driven TTS mute + replay last answer
+(()=> {
+  'use strict';
 
-const CONFIG = {
-  wsPath: '/ws',
-  sfx: { ask:'/sounds/ask.mp3', hype:'/sounds/hype.mp3', promo:'/sounds/promo.mp3', volume:0.9 },
-  tts: { enabled:true, endpoint:'/api/tts', voiceHint:'', volume:1.0, rate:1.0, pitch:1.0 },
-  durations: { preTtsDelayMs_question: 600, preTtsDelayMs_answer: 250, hypeMs: 12000, tickerMs: 4500 }
-};
+  // --- Timings & flags ---
+  const DELAYS = {
+    questionToAnswerMs: 1500,  // << shorter gap you asked for
+    hypeGlowMs: 12000,
+    clearAfterMs: 60000,
+    minAfterAlertMs: 3000      // wait ~3s after alert starts
+  };
+  const USE_TTS_FOR = { question: true, answer: true };
 
-const els = {
-  cta:document.getElementById('cta'),
-  user:document.getElementById('ctaUser'),
-  q:document.getElementById('ctaQuestion'),
-  a:document.getElementById('ctaAnswer'),
-  sfx:document.getElementById('sfx'),
-  tts:document.getElementById('tts'),
-  ticker:document.getElementById('ctaTicker')
-};
+  // --- Elements ---
+  const el = {
+    cta:    document.getElementById('cta'),
+    user:   document.getElementById('ctaUser'),
+    q:      document.getElementById('ctaQuestion'),
+    a:      document.getElementById('ctaAnswer'),
+    ticker: document.getElementById('ctaTicker'),
+    sfx:    document.getElementById('sfx'),
+    tts:    document.getElementById('tts'),
+    gate:   document.getElementById('soundGate'),
+  };
 
-// ===== Helpers =====
-function text(el, v){ if(el) el.textContent = v ?? ''; }
-function add(cls){ els.cta && els.cta.classList.add(cls); }
-function remove(cls){ els.cta && els.cta.classList.remove(cls); }
-function normalizeQuestion(q=''){ return String(q).replace(/^asks:\s*/i,'').trim(); }
+  // --- State ---
+  const inbox = [];
+  let processing = false;
+  let lastEvent = null;
+  let tickerTimer = null, tickerIdx = 0, tickerPaused = false;
+  let clearDisplayTimer = null;
 
-// ===== Rotating ticker =====
-(function ticker(){
-  const nodes = els.ticker?.querySelectorAll('.msg') || [];
-  if (!nodes.length) return;
-  let i=0;
-  nodes[0].classList.add('active');
-  setInterval(()=>{
-    nodes.forEach(n=>n.classList.remove('active'));
-    i=(i+1)%nodes.length;
-    nodes[i].classList.add('active');
-  }, CONFIG.durations.tickerMs);
-})();
-
-// ===== Audio unlock =====
-let audioUnlocked=false;
-function unlock(){
-  if (audioUnlocked) return;
-  [els.sfx, els.tts].forEach(el=>{
-    if(!el) return;
-    el.volume=0.001; el.src=CONFIG.sfx.ask;
-    el.play().then(()=>{ el.pause(); el.currentTime=0; }).catch(()=>{});
-  });
-  audioUnlocked=true;
-  console.log('[audio] unlocked');
-}
-window.addEventListener('pointerdown', unlock, {once:true});
-window.addEventListener('keydown', unlock, {once:true});
-window.addEventListener('load', ()=>setTimeout(unlock,300));
-
-// ===== SFX =====
-function playSfx(kind){
-  const src = CONFIG.sfx[kind]; if(!src||!els.sfx) return;
-  els.sfx.volume = CONFIG.sfx.volume ?? 1.0;
-  if (els.sfx.src !== src) els.sfx.src = src;
-  els.sfx.currentTime=0; els.sfx.play().catch(()=>{});
-}
-
-// ===== TTS queue (question -> answer, no overlap) =====
-window.__UNC_TTS_MUTED__ = false;      // server can toggle this
-window.__unc_last__ = null;            // last { user, q, a, tier } for replay
-
-const TTS = (() => {
-  let queue=[], playing=false;
-  function next(){
-    if (playing) return;
-    const item = queue.shift(); if(!item) return;
-    playing = true;
-
-    const pre = (item.kind==='question') ? (CONFIG.durations.preTtsDelayMs_question||600)
-                                          : (CONFIG.durations.preTtsDelayMs_answer||250);
-
-    setTimeout(()=>{
-      const base = CONFIG.tts.endpoint || '/api/tts';
-      const voice = CONFIG.tts.voiceHint ? `&voice=${encodeURIComponent(CONFIG.tts.voiceHint)}` : '';
-      const url = `${base}?q=${encodeURIComponent(item.text)}${voice}`;
-      if (item.kind==='question') playSfx('ask');
-      if (!els.tts) { playing=false; return next(); }
-      els.tts.volume = CONFIG.tts.volume ?? 1.0;
-      els.tts.src = url; els.tts.currentTime=0;
-      els.tts.play().then(()=>{}).catch(()=>{ playing=false; next(); });
-    }, pre);
+  // --- Utils ---
+  const delay = ms => new Promise(r => setTimeout(r, ms));
+  const cleanQuestion = t => String(t || '').replace(/^asks:\s*/i, '').trim();
+  function stopAudio(a){ try{ a.pause(); a.currentTime = 0; }catch{} }
+  function setHypeGlow(on){
+    el.cta.classList.toggle('hype-active', !!on);
+    if (on) setTimeout(()=>el.cta.classList.remove('hype-active'), DELAYS.hypeGlowMs);
   }
-  els.tts?.addEventListener('ended', ()=>{ playing=false; next(); });
-  els.tts?.addEventListener('error', ()=>{ playing=false; next(); });
-  return {
-    reset(){ try{ els.tts.pause(); }catch{} playing=false; queue=[]; },
-    enqueue(text, kind){
-      if(!CONFIG.tts.enabled || !text || window.__UNC_TTS_MUTED__) return;
-      queue.push({text,kind}); next();
+  function cancelAutoClear(){ if (clearDisplayTimer) { clearTimeout(clearDisplayTimer); clearDisplayTimer = null; } }
+  function scheduleAutoClear(){
+    cancelAutoClear();
+    clearDisplayTimer = setTimeout(()=>{
+      el.user.textContent = '';
+      el.q.textContent    = '';
+      el.a.textContent    = '';
+    }, DELAYS.clearAfterMs);
+  }
+
+  // --- Ticker rotation (pauses during speech) ---
+  function startTicker(){
+    if (!el.ticker) return;
+    const msgs = [...el.ticker.querySelectorAll('.msg')];
+    if (!msgs.length) return;
+    msgs.forEach(m => m.classList.remove('active'));
+    tickerIdx = 0; msgs[0].classList.add('active');
+    if (tickerTimer) clearInterval(tickerTimer);
+    tickerTimer = setInterval(()=>{
+      if (tickerPaused) return;
+      msgs[tickerIdx].classList.remove('active');
+      tickerIdx = (tickerIdx + 1) % msgs.length;
+      msgs[tickerIdx].classList.add('active');
+    }, 3500);
+  }
+  function pauseTicker(b){ tickerPaused = !!b; }
+  startTicker();
+
+  // --- Web Audio controller + autoplay gate (Safari-friendly) ---
+  const AudioCtl = {
+    ctx: null,
+    ready: false,
+    waiters: [],
+    _installed: false,
+    async ensure(){
+      if (!this.ctx) this.ctx = new (window.AudioContext || window.webkitAudioContext)();
+      if (this.ctx.state === 'running') { this.ready = true; this._flush(); this._hideGate(); return; }
+      this._installUnlock(); this._showGate();
+    },
+    _installUnlock(){
+      if (this._installed) return; this._installed = true;
+      const tryResume = async ()=>{
+        try{
+          if (!this.ctx) this.ctx = new (window.AudioContext || window.webkitAudioContext)();
+          await this.ctx.resume();
+          // Safari warm-up: silent 10ms tone to fully unlock output
+          const osc = this.ctx.createOscillator();
+          const gain = this.ctx.createGain();
+          gain.gain.value = 0.0001;
+          osc.connect(gain).connect(this.ctx.destination);
+          osc.start();
+          osc.stop(this.ctx.currentTime + 0.01);
+        }catch{}
+        if (this.ctx && this.ctx.state === 'running'){
+          this.ready = true; this._flush(); this._hideGate();
+          window.removeEventListener('pointerdown', tryResume);
+          window.removeEventListener('keydown', tryResume);
+          if (el.gate) el.gate.onclick = null;
+        }
+      };
+      window.addEventListener('pointerdown', tryResume);
+      window.addEventListener('keydown', tryResume);
+      if (el.gate) el.gate.onclick = tryResume;
+    },
+    _showGate(){ if (el.gate) el.gate.style.display = 'block'; },
+    _hideGate(){ if (el.gate) el.gate.style.display = 'none'; },
+    waitUntilRunning(){
+      if (this.ready && this.ctx && this.ctx.state === 'running') return Promise.resolve();
+      this.ensure(); return new Promise(res => this.waiters.push(res));
+    },
+    _flush(){ const w = this.waiters.splice(0); w.forEach(fn => { try{ fn(); }catch{} }); },
+    async playMp3ArrayBuffer(buf){
+      await this.waitUntilRunning();
+      // decodeAudioData returns a Promise in modern browsers; fallback if needed
+      let abuf;
+      try {
+        abuf = await this.ctx.decodeAudioData(buf.slice(0));
+      } catch {
+        abuf = await new Promise((res, rej)=>{
+          this.ctx.decodeAudioData(buf.slice(0), res, rej);
+        });
+      }
+      await new Promise((resolve, reject)=>{
+        try{
+          const src = this.ctx.createBufferSource();
+          src.buffer = abuf;
+          src.connect(this.ctx.destination);
+          src.onended = resolve;
+          src.start(0);
+        }catch(e){ reject(e); }
+      });
     }
   };
+
+  // Fallback data URL player (still no blob:)
+  function arrayBufferToBase64(buffer){
+    let binary = '', bytes = new Uint8Array(buffer), chunk = 0x8000;
+    for (let i=0;i<bytes.length;i+=chunk){
+      binary += String.fromCharCode.apply(null, bytes.subarray(i, i+chunk));
+    }
+    return btoa(binary);
+  }
+
+  // --- Play alert, then wait until it really starts + >=3s/ended ---
+  async function playAskSoundOnce(){
+    try{
+      await AudioCtl.waitUntilRunning();
+      el.sfx.src = 'sounds/ask.mp3';
+      el.sfx.currentTime = 0;
+
+      // Wait until the audio actually enters playing state
+      const whenPlaying = new Promise(res=>{
+        if (!el.sfx.paused && !el.sfx.ended) return res();
+        const onPlay = ()=>{ el.sfx.removeEventListener('playing', onPlay); res(); };
+        el.sfx.addEventListener('playing', onPlay, { once: true });
+      });
+
+      // Kick off playback (promise resolves when it *starts*)
+      await el.sfx.play().catch(()=>{});
+      await whenPlaying.catch(()=>{});
+
+      const t0 = performance.now();
+
+      // Wait for (a) end or timeout, then (b) ensure >= minAfterAlertMs elapsed
+      const endedOrTimeout = new Promise(res=>{
+        const finish = ()=>{ el.sfx.onended = null; el.sfx.onpause = null; res(); };
+        el.sfx.onended = finish;
+        el.sfx.onpause = finish;
+        setTimeout(res, 6000); // safety: cap overly long/looping files
+      });
+      await endedOrTimeout;
+
+      const elapsed = performance.now() - t0;
+      const remain = Math.max(0, DELAYS.minAfterAlertMs - elapsed);
+      if (remain > 0) await delay(remain);
+
+    }catch{}
+  }
+
+  // --- TTS fetch & play (no blob URLs) ---
+  async function tts(text){
+    try{
+      await AudioCtl.waitUntilRunning();
+      const res = await fetch(`/api/tts?q=${encodeURIComponent(text)}`, { cache: 'no-store' });
+      if (!res.ok) return; // 204 if muted
+      const buf = await res.arrayBuffer();
+      try {
+        await AudioCtl.playMp3ArrayBuffer(buf);
+        return;
+      } catch {
+        // fallback to data URL
+        el.tts.src = 'data:audio/mpeg;base64,' + arrayBufferToBase64(buf);
+        await new Promise(resolve=>{
+          const done = ()=>{ el.tts.onended = null; el.tts.onerror = null; resolve(); };
+          el.tts.onended = done; el.tts.onerror = done;
+          el.tts.play().catch(done);
+        });
+      }
+    }catch{}
+  }
+
+  // --- Render helpers ---
+  function renderQuestion(user, question, tier){
+    cancelAutoClear();
+    stopAudio(el.tts);
+    el.user.textContent = user || 'Viewer';
+    el.q.textContent    = question || '';
+    el.a.textContent    = '';
+    setHypeGlow(tier === 'hype');
+  }
+  function revealAnswer(answer){ el.a.textContent = answer || ''; }
+
+  // --- Play one event fully ---
+  async function playEvent(ev){
+    const user = ev.user || 'Viewer';
+    const q    = cleanQuestion(ev.question);
+    const a    = ev.answer || '';
+    const tier = ev.tier || 'free';
+    lastEvent  = { user, question: q, answer: a, tier };
+
+    pauseTicker(true);
+    renderQuestion(user, q, tier);
+
+    // 1) Alert sound first, then Question TTS
+    await playAskSoundOnce();
+    if (USE_TTS_FOR.question && q) await tts(`${user} asks: ${q}`);
+
+    // 2) Shorter gap, then Answer TTS
+    await delay(DELAYS.questionToAnswerMs);
+    revealAnswer(a);
+    if (USE_TTS_FOR.answer && a) await tts(a);
+
+    pauseTicker(false);
+    scheduleAutoClear();
+  }
+
+  async function drain(){ if (processing) return; processing = true; while (inbox.length){ await playEvent(inbox.shift()); } processing = false; }
+  function enqueue(ev){ inbox.push(ev); drain(); }
+
+  // --- WebSocket wiring ---
+  function wsURL(){
+    try {
+      const u = new URL(location.href);
+      u.protocol = u.protocol.replace('http', 'ws');
+      u.pathname = '/ws'; u.search = ''; u.hash = '';
+      return u.toString();
+    } catch {
+      return location.origin.replace(/^http/, 'ws') + '/ws';
+    }
+  }
+  let ws = null;
+  function connectWS(){
+    try { if (ws) ws.close(); } catch {}
+    ws = new WebSocket(wsURL());
+    ws.onopen   = ()=>console.log('[ws] connected');
+    ws.onclose  = ()=>{ console.log('[ws] closed; retrying…'); setTimeout(connectWS, 1500); };
+    ws.onerror  = e => console.warn('[ws] error', e?.message || e);
+    ws.onmessage = ev=>{
+      let msg = null; try{ msg = JSON.parse(ev.data); }catch{ return; }
+      if (!msg?.type) return;
+      if (msg.type === 'uncgpt:answer') enqueue(msg);
+      else if (msg.type === 'uncgpt:replay' && lastEvent) enqueue({ ...lastEvent });
+    };
+  }
+  connectWS();
+
+  // Show sound gate immediately if needed
+  AudioCtl.ensure();
 })();
 
-// ===== UI =====
-function showQuestion(user, q){
-  text(els.user, user || 'Viewer');
-  text(els.q, normalizeQuestion(q||''));   // fix “asks asks”
-  text(els.a, '');
-  remove('hype-active');
-}
-function showAnswer(ans){ text(els.a, (ans||'').trim()); }
-function triggerHype(){ add('hype-active'); playSfx('hype'); setTimeout(()=>remove('hype-active'), CONFIG.durations.hypeMs); }
-
-// ===== WebSocket =====
-let ws=null, retry=null;
-function connect(){
-  try{ if(ws) ws.close(); }catch{}
-  const scheme = location.protocol==='https:' ? 'wss':'ws';
-  ws = new WebSocket(`${scheme}://${location.host}${CONFIG.wsPath}`);
-  ws.onopen = ()=>console.log('[ws] connected');
-  ws.onclose = ()=>{ console.log('[ws] closed, retrying…'); clearTimeout(retry); retry=setTimeout(connect,1200); };
-  ws.onerror = ()=>ws.close();
-  ws.onmessage = (ev)=>{
-    let msg=null; try{ msg = JSON.parse(ev.data); }catch{ return; }
-    if (!msg || !msg.type) return;
-
-    switch (msg.type) {
-      case 'uncgpt:answer': {
-        const user = msg.user || 'Viewer';
-        const q = msg.question || '';
-        const a = msg.answer || '';
-        showQuestion(user, q);
-        showAnswer(a);
-        // remember last for replay
-        window.__unc_last__ = { user, q, a, tier: msg.tier };
-        // speak in order
-        TTS.reset();
-        TTS.enqueue(`${user} asks: ${normalizeQuestion(q)}`, 'question');
-        if (a) TTS.enqueue(a, 'answer');
-        if (msg.tier === 'hype') triggerHype();
-        break;
-      }
-      case 'uncgpt:moderation_block': {
-        showQuestion(msg.user||'Viewer', msg.question||'');
-        showAnswer('Can’t answer that. Ask something safe.');
-        break;
-      }
-      case 'uncgpt:queue:update':
-        // optional: display queue length somewhere
-        break;
-      case 'uncgpt:tts_mute': {
-        // server-driven mute toggle (Mod Panel)
-        window.__UNC_TTS_MUTED__ = !!msg.enabled;
-        break;
-      }
-      case 'uncgpt:replay': {
-        // server-driven replay
-        const last = window.__unc_last__;
-        if (last) {
-          const { user, q, a, tier } = last;
-          TTS.reset();
-          TTS.enqueue(`${user} asks: ${normalizeQuestion(q)}`, 'question');
-          if (a) TTS.enqueue(a, 'answer');
-          if (tier === 'hype') triggerHype();
-        }
-        break;
-      }
-      default: break;
-    }
-  };
-}
-connect();
-
-// ===== Debug hotkeys =====
-// Shift+T -> test TTS; Shift+H -> hype glow
-window.addEventListener('keydown', (e)=>{
-  if(!e.shiftKey) return;
-  const k=e.key.toLowerCase();
-  if(k==='t'){ TTS.reset(); TTS.enqueue('TTS test hotkey', 'answer'); }
-  if(k==='h'){ triggerHype(); }
-});
