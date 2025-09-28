@@ -156,3 +156,9 @@ source ~/.zshrc
 
 
 To go back to persistent, set ADMIN_TOKEN=superstreamer123 in .env and restore your normal drillstart.
+
+### Safari TTS tip
+If you don’t hear TTS in Safari but the alert plays:
+1) Safari → Settings for This Website… → Auto-Play: **Allow All Auto-Play**
+2) Reload and click once in the overlay tab.
+(We also ship a Safari fallback that uses the <audio> element when WebAudio is suspended.)
