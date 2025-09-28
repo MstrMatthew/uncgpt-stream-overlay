@@ -4,3 +4,6 @@ node_modules/
 npm-debug.log*
 tokens.twitch.json
 .admin_token
+.env.bak-*
+*bak-*
+tokens.twitch.json.bak-*

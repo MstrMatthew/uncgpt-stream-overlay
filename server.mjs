@@ -1,7 +1,8 @@
 // server.mjs — UncGPT overlay server with Twitch EventSub WS + StreamElements tips
 // npm i express ws dotenv openai
 
-import 'dotenv/config';
+import dotenv from "dotenv";
+dotenv.config({ override: true });
 import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
