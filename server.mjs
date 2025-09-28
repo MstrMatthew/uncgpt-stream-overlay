@@ -7,6 +7,8 @@ import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
 import express from 'express';
+function _safeText(x){try{return String(x)}catch{return '<non-text>'}}
+
 import http from 'http';
 import { WebSocketServer, WebSocket as WSClient } from 'ws';
 import crypto from 'crypto';
