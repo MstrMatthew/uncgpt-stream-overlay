@@ -2,20 +2,31 @@
 // npm i express ws dotenv openai
 
 import dotenv from "dotenv";
-import { connectSE } from "./se-realtime.mjs";
 dotenv.config({ override: true });
-
+const USE_SE_RAW = false;
+// --- StreamElements Realtime (Socket.IO) — stop 30s disconnect loop ---
 if (process.env.SE_JWT) {
-  connectSE({ jwt: process.env.SE_JWT });
+  import('./se-realtime.mjs')
+    .then(({ connectSE }) => {
+      connectSE({
+        jwt: process.env.SE_JWT,
+        // (optional) handle SE events if you want to react in-app:
+        onEvent: (evt) => {
+          // console.log('[se] event passthrough:', evt?.type);
+          // Example: if you ever want to trigger overlay messages from SE tips,
+          // you could call your enqueue/broadcast helper here.
+        },
+      });
+    })
+    .catch((e) => console.warn("[se] init failed:", e?.message || e));
 } else {
   console.warn("[se] missing SE_JWT; skipping SE realtime");
 }
+
 import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
 import express from 'express';
-function _safeText(x){try{return String(x)}catch{return '<non-text>'}}
-
 import http from 'http';
 import { WebSocketServer, WebSocket as WSClient } from 'ws';
 import crypto from 'crypto';
@@ -511,22 +522,43 @@ async function ensureChannelPointsSubscription(sessionId, tok) {
 // -----------------------------------------------------------------------------
 // StreamElements Realtime (tips)
 // -----------------------------------------------------------------------------
+if (USE_SE_RAW) {
+
 let seWS = null;
 function startStreamElementsWS() {
-  return; // disabled raw SE WS
-
   if (!SE_JWT) { console.log('[se] SE_JWT missing; tips disabled'); return; }
   try { if (seWS) seWS.close(); } catch {}
 
   const url = 'wss://realtime.streamelements.com/socket.io/?EIO=3&transport=websocket';
   seWS = new WSClient(url);
+// --- StreamElements heartbeat: reply '3' to engine.io ping '2' + keepalive ---
+try {
+  // Reply “3” to any engine.io ping “2”
+  seWS.on('message', (data) => {
+    try {
+      const msg = (typeof data === 'string') ? data : (data && data.toString ? data.toString() : '');
+      if (msg === '2') { try { seWS.send('3'); } catch {} }  // pong immediately
+    } catch {}
+  });
+
+  // Timed keepalive (helps even if we somehow miss a ping)
+  let __seKeepAlive = setInterval(() => {
+    try { seWS.send('3'); } catch {}
+  }, 20000); // 20s
+
+  // Better close logging + cleanup timer
+  seWS.on('close', (code, reason) => {
+    try { console.log('[se] ws closed, retrying in 5s code=%s reason=%s', code, String(reason||'')); } catch {}
+    try { clearInterval(__seKeepAlive); } catch {}
+  });
+} catch {}
 
   function send(obj) { try { seWS.send(typeof obj === 'string' ? obj : JSON.stringify(obj)); } catch {} }
 
   seWS.on('open', ()=> console.log('[se] ws open'));
   seWS.on('close', ()=> { console.log('[se] ws closed, retrying in 5s'); setTimeout(startStreamElementsWS, 5000); });
   seWS.on('error', err => console.error('[se] ws error', err?.message||err));
-
+}
   seWS.on('message', (data) => {
     const text = data.toString();
 
@@ -577,7 +609,6 @@ if (eventName === 'event') {
     }
   });
 }
-
 // -----------------------------------------------------------------------------
 // Start
 // -----------------------------------------------------------------------------
@@ -588,7 +619,7 @@ server.listen(PORT, ()=>{
   console.log('WS     :', `${BASE.replace('http','ws')}/ws`);
   // kick off sockets
   startEventSubWS().catch(()=>{});
-// startStreamElementsWS(); // disabled (Socket.IO client in use)
+  startStreamElementsWS();
 });
 // ---- Persistence (queue + history) ----
 function ensureDataDir() {
