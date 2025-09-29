@@ -1,5 +1,6 @@
-function getAdminToken(){ return localStorage.getItem('adminToken') || ''; }
-function setAdminToken(t){ localStorage.setItem('adminToken', t||''); }
+function getAdminToken(){ return sessionStorage.getItem('adminToken') || ''; }
+function setAdminToken(t){ if(t){ sessionStorage.setItem('adminToken', t); } else { sessionStorage.removeItem('adminToken'); } }
+(function(){ try{ const u=new URL(location.href); const t=u.searchParams.get('token'); if(t){ setAdminToken(t); u.searchParams.delete('token'); history.replaceState(null,'',u.toString()); } }catch(e){} })();
 
 async function call(method, path){
   const res = await fetch(path, { method, headers: { 'X-Admin-Token': getAdminToken() }});

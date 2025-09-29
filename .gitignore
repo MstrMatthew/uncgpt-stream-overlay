@@ -1,25 +1,28 @@
-.env
-node_modules/
-.DS_Store
-npm-debug.log*
-tokens.twitch.json
-.admin_token
-.env.bak-*
-*bak-*
-tokens.twitch.json.bak-*
-*.brok-*
-backups/
+# secrets
 .env
 .admin_token
 tokens.twitch.json
 tokens.twitch.json.bak-*
-node_modules/
-backups/
+app_token.json
+state.json
+
+# runtime data
 data/
+backups/
+
+# deps & build
+node_modules/
+dist/
+build/
+coverage/
+*.log
+
+# macOS and zips/apps
+.DS_Store
 *.zip
+UncGPT Start.app
+UncGPT Start.command
+
+# misc scratch
 *.bak-*
 *.brok-*
-.DS_Store
-UncGPT Start.app
-
-*.zip

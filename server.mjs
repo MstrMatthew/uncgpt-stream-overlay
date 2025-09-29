@@ -30,6 +30,8 @@ const FREE_MIN      = Number(process.env.FREE_TIER_MIN_CENTS || 100);
 const HYPE_MIN      = Number(process.env.HYPE_TIER_MIN_CENTS || 300);
 const BITS_TO_CENTS = Number(process.env.BITS_TO_CENTS || 1);
 const MOD_HOLD_MS   = Number(process.env.MOD_HOLD_MS || 5000);
+function normalizeQuestion(q){const s=String(q||"").trim();if(!s)return s;return /^asks:\s*/i.test(s)||/\?$/.test(s)?s:("asks: "+s);} 
+const MAX_QUESTION_CHARS = Number(process.env.MAX_QUESTION_CHARS || 280);
 
 const TWITCH_CLIENT_ID       = process.env.TWITCH_CLIENT_ID || "";
 const TWITCH_CLIENT_SECRET   = process.env.TWITCH_CLIENT_SECRET || "";
@@ -183,6 +185,22 @@ function bumpItem(id) {
 function nextQueued() { return queue.find(x => x.status === "queued"); }
 
 function receiveItem({ user, question, amountCents=0, source="mod" }) {
+const __nowTs=Date.now();
+try{
+  if ({ user && typeof { user==="object"){
+    const __u = ({ user.user??"Viewer");
+    let __q = normalizeQuestion({ user.question??"");
+    const __max = Number(process.env.MAX_QUESTION_CHARS||MAX_QUESTION_CHARS||0);
+    if (__max && __q.length>__max) __q = __q.slice(0,__max);
+    if (Array.isArray(queue)){
+      const __dup = queue.find(x=>x.user===__u && x.question===__q && (__nowTs-(x.ts||0))<60000 && (x.status==="staged"||x.status==="queued"));
+      if (__dup) return __dup;
+    }
+    { user.user = __u;
+    { user.question = __q;
+  }
+}catch(__e){}
+
   const tier = deriveTier(amountCents);
   const priority = tier === "hype" ? 1 : 0;
   const item = {

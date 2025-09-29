@@ -2,7 +2,7 @@
   "name": "drillsgpt",
   "version": "1.0.0",
   "description": "",
-  "main": "modpanel.js",
+  "main": "server.mjs",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
     "start": "node server.mjs"
@@ -14,7 +14,7 @@
   "keywords": [],
   "author": "",
   "license": "ISC",
-  "type": "commonjs",
+  "type": "module",
   "bugs": {
     "url": "https://github.com/MstrMatthew/uncgpt-stream-overlay/issues"
   },
@@ -25,5 +25,6 @@
     "openai": "^5.12.2",
     "socket.io-client": "^4.8.1",
     "ws": "^8.18.3"
-  }
+  },
+  "private": true
 }
