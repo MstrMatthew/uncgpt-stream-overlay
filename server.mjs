@@ -185,23 +185,25 @@ function bumpItem(id) {
 function nextQueued() { return queue.find(x => x.status === "queued"); }
 
 function receiveItem({ user, question, amountCents=0, source="mod" }) {
-const __nowTs=Date.now();
-try{
-  if ({ user && typeof { user==="object"){
-    const __u = ({ user.user??"Viewer");
-    let __q = normalizeQuestion({ user.question??"");
-    const __max = Number(process.env.MAX_QUESTION_CHARS||MAX_QUESTION_CHARS||0);
-    if (__max && __q.length>__max) __q = __q.slice(0,__max);
-    if (Array.isArray(queue)){
-      const __dup = queue.find(x=>x.user===__u && x.question===__q && (__nowTs-(x.ts||0))<60000 && (x.status==="staged"||x.status==="queued"));
-      if (__dup) return __dup;
-    }
-    { user.user = __u;
+const __arg0 = arguments[0];
+if (__arg0 && typeof __arg0 === "object") {
+  const __u = (__arg0.user ?? "Viewer");
+  let __q = normalizeQuestion(__arg0.question ?? "");
+  const __max = Number(process.env.MAX_QUESTION_CHARS || (typeof MAX_QUESTION_CHARS !== "undefined" ? MAX_QUESTION_CHARS : 0) || 0);
+  if (__max && __q.length > __max) __q = __q.slice(0, __max);
+  if (Array.isArray(queue)) {
+    const __dup = queue.find(x => x.user === __u && x.question === __q && (Date.now() - (x.ts || 0)) < 60000 && (x.status === "staged" || x.status === "queued"));
+    if (__dup) return __dup;
+  }
+  __arg0.user = __u;
+  __arg0.question = __q;
+}
+
+{ user.user = __u;
     { user.question = __q;
   }
-}catch(__e){}
-
-  const tier = deriveTier(amountCents);
+}
+const tier = deriveTier(amountCents);
   const priority = tier === "hype" ? 1 : 0;
   const item = {
     id: Date.now().toString(36) + Math.random().toString(36).slice(2,6),
