@@ -1,29 +1,21 @@
-const ADMIN_TOKEN = '78yerssir69wearegonnadoit420nice'; // set this to the same value as in your .env
-async function setVoice(v){
-  await fetch(`/admin/tts/voice?voice=${encodeURIComponent(v)}`, { method:'PUT', headers:{ 'X-Admin-Token': ADMIN_TOKEN }});
-}
-async function setMute(on){
-  await fetch(`/admin/tts/mute?enabled=${on?'true':'false'}`, { method:'PUT', headers:{ 'X-Admin-Token': ADMIN_TOKEN }});
-}
-async function replay(){
-  await fetch(`/admin/overlay/replay`, { method:'POST', headers:{ 'X-Admin-Token': ADMIN_TOKEN }});
+function getAdminToken(){ return localStorage.getItem('adminToken') || ''; }
+function setAdminToken(t){ localStorage.setItem('adminToken', t||''); }
+
+async function call(method, path){
+  const res = await fetch(path, { method, headers: { 'X-Admin-Token': getAdminToken() }});
+  if (!res.ok) throw new Error("HTTP "+res.status);
+  try { return await res.json(); } catch { return {}; }
 }
 
-document.getElementById('setVoice').onclick = async ()=>{
-  const v = document.getElementById('voice').value;
-  await setVoice(v);
-};
-document.getElementById('muteTts').onchange = async (e)=> {
-  await setMute(e.target.checked);
-};
-document.getElementById('replay').onclick = async ()=> {
-  await replay();
-};
 const API = {
-  add: async (payload)=> fetch('/api/ask',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)}).then(r=>r.json()),
-  list: async ()=> fetch('/api/queue').then(r=>r.json()),
-  stop: async (id)=> fetch(`/api/queue/${id}/stop`,{method:'POST'}).then(r=>r.json()),
-  bump: async (id)=> fetch(`/api/queue/${id}/answer-now`,{method:'POST'}).then(r=>r.json())
+  list:   ()=> call('GET',  '/admin/queue/list'),
+  bump:   (id)=> call('PUT', '/admin/queue/bump?id='+encodeURIComponent(id)),
+  ignore: (id)=> call('PUT', '/admin/queue/ignore?id='+encodeURIComponent(id)),
+  force:  (id)=> call('PUT', '/admin/queue/force?id='+encodeURIComponent(id)),
+  ask:    (body)=> fetch('/api/ask',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}).then(r=>r.json()),
+  mute:   (on)=> call('PUT', '/admin/tts/mute?enabled='+(on?'true':'false')),
+  voice:  (v)=> call('PUT', '/admin/tts/voice?voice='+encodeURIComponent(v)),
+  replay: ()=> call('POST','/admin/overlay/replay')
 };
 
 const els = {
@@ -32,76 +24,74 @@ const els = {
   q:    document.getElementById('fQ'),
   amt:  document.getElementById('fAmt'),
   src:  document.getElementById('fSrc'),
-  body: document.getElementById('qBody')
+  body: document.getElementById('qBody'),
+  tok:  document.getElementById('adminToken'),
+  mute: document.getElementById('muteTts'),
+  voice:document.getElementById('voice')
 };
 
-async function refresh(){
-  const { items } = await API.list();
-  els.body.innerHTML = '';
-  for (const it of items) {
-    const tr = document.createElement('tr');
+if (els.tok) els.tok.value = getAdminToken();
 
-    const tdUser = document.createElement('td');
-    tdUser.textContent = it.user;
-    tr.appendChild(tdUser);
+document.getElementById('saveToken')?.addEventListener('click', ()=>{
+  const v = els.tok.value.trim();
+  setAdminToken(v); refresh();
+});
+document.getElementById('replay')?.addEventListener('click', ()=> API.replay().catch(()=>{}));
+document.getElementById('setVoice')?.addEventListener('click', ()=> API.voice(els.voice.value).catch(()=>{}));
+els.mute?.addEventListener('change', (e)=> API.mute(!!e.target.checked).catch(()=>{}));
 
-    const tdQ = document.createElement('td');
-    tdQ.textContent = it.question;
-    tr.appendChild(tdQ);
-
-    const tdTier = document.createElement('td');
-    tdTier.innerHTML = it.tier === 'hype'
-      ? '<span class="pill hype">HYPE</span>'
-      : '<span class="pill">free</span>';
-    tr.appendChild(tdTier);
-
-    const tdSrc = document.createElement('td');
-    tdSrc.textContent = it.source + (it.amountCents ? ` (${it.amountCents}¢)` : '');
-    tr.appendChild(tdSrc);
-
-    const tdActions = document.createElement('td');
-    tdActions.className = 'actions';
-    const bStop = document.createElement('button');
-    bStop.textContent = 'Stop';
-    bStop.onclick = async ()=>{ await API.stop(it.id); await refresh(); };
-    const bNow = document.createElement('button');
-    bNow.textContent = 'Answer Now';
-    bNow.onclick = async ()=>{ await API.bump(it.id); await refresh(); };
-    tdActions.append(bStop, bNow);
-    tr.appendChild(tdActions);
-
-    els.body.appendChild(tr);
-  }
-}
-
-els.form.addEventListener('submit', async (e)=>{
+if (els.form) els.form.onsubmit = async (e)=>{
   e.preventDefault();
   const payload = {
-    user: (els.user.value || 'Viewer').trim(),
-    question: els.q.value.trim(),
-    amountCents: Math.max(0, Number(els.amt.value||0)|0),
-    source: els.src.value
+    user: els.user.value || 'Viewer',
+    question: els.q.value || '',
+    amountCents: Number(els.amt.value||0),
+    source: els.src.value || 'mod'
   };
-  if (!payload.question) return;
-  await API.add(payload);
-  els.q.value='';
-  await refresh();
-});
+  await API.ask(payload).catch(()=>{});
+  els.q.value=''; refresh();
+};
 
-// WS to live-update
-let ws=null, retry=null;
-function connect(){
-  try{ if(ws) ws.close(); }catch{}
-  const scheme = location.protocol==='https:' ? 'wss':'ws';
-  ws = new WebSocket(`${scheme}://${location.host}/ws`);
-  ws.onopen = ()=>console.log('[ws] connected');
-  ws.onclose = ()=>{ console.log('[ws] closed, retrying…'); clearTimeout(retry); retry=setTimeout(connect,1200); };
-  ws.onerror = ()=>ws.close();
-  ws.onmessage = (ev)=>{
-    let msg=null; try{ msg=JSON.parse(ev.data); }catch{ return; }
-    if (msg.type==='uncgpt:queue:update') refresh();
-  };
+function pill(tier){
+  if (tier==='hype') return '<span class="pill hype">HYPE</span>';
+  if (tier==='free') return '<span class="pill">FREE</span>';
+  return '';
 }
-connect();
-refresh();
 
+async function refresh(){
+  try {
+    const { items=[] } = await API.list();
+    if (!els.body) return;
+    els.body.innerHTML = '';
+    for (const it of items) {
+      const tr = document.createElement('tr');
+      tr.innerHTML = `
+        <td>${it.user||'Viewer'}</td>
+        <td>${String(it.question||'').replace(/^asks:\s*/i,'')}</td>
+        <td>${pill(it.tier)}</td>
+        <td>${it.status||''}</td>
+        <td>${it.source||''}</td>
+        <td class="actions">
+          <button data-id="${it.id}" data-act="force">Force</button>
+          <button data-id="${it.id}" data-act="bump">Bump</button>
+          <button data-id="${it.id}" data-act="ignore">Ignore</button>
+        </td>
+      `;
+      els.body.appendChild(tr);
+    }
+    els.body.querySelectorAll('button').forEach(btn=>{
+      btn.onclick = async ()=>{
+        const id = btn.getAttribute('data-id');
+        const act = btn.getAttribute('data-act');
+        try {
+          if (act==='force') await API.force(id);
+          else if (act==='bump') await API.bump(id);
+          else if (act==='ignore') await API.ignore(id);
+        } catch {}
+        refresh();
+      };
+    });
+  } catch {}
+}
+
+refresh();
