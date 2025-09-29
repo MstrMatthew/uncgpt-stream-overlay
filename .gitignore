@@ -26,3 +26,6 @@ UncGPT Start.command
 # misc scratch
 *.bak-*
 *.brok-*
+
+# docs & editor junk
+*.rtf

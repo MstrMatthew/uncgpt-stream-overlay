@@ -199,10 +199,7 @@ if (__arg0 && typeof __arg0 === "object") {
   __arg0.question = __q;
 }
 
-{ user.user = __u;
-    { user.question = __q;
-  }
-}
+
 const tier = deriveTier(amountCents);
   const priority = tier === "hype" ? 1 : 0;
   const item = {
