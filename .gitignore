@@ -7,3 +7,19 @@ tokens.twitch.json
 .env.bak-*
 *bak-*
 tokens.twitch.json.bak-*
+*.brok-*
+backups/
+.env
+.admin_token
+tokens.twitch.json
+tokens.twitch.json.bak-*
+node_modules/
+backups/
+data/
+*.zip
+*.bak-*
+*.brok-*
+.DS_Store
+UncGPT Start.app
+
+*.zip
